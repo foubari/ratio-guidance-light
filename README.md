@@ -84,7 +84,18 @@ python src/train_ratio.py --loss_type kliep --epochs 30
 
 Models will be saved to `checkpoints/ratio/<loss_type>/`.
 
-### 3. Generate Samples
+### 3. Train Classifiers (for Evaluation)
+
+Train classifiers to evaluate guided sampling quality:
+
+```bash
+# Train classifiers for both standard and rotated MNIST
+python src/train_classifier.py --dataset both --epochs 10
+```
+
+Classifiers will be saved to `checkpoints/classifiers/`.
+
+### 4. Generate Samples
 
 ```bash
 # Unconditional sampling from standard MNIST
@@ -97,6 +108,23 @@ python src/sample.py --dataset standard --num_samples 16 \
 ```
 
 Outputs will be saved to `outputs/`.
+
+### 5. Evaluate Guidance Quality
+
+Compute matching accuracy (% of generated pairs with same digit label):
+
+```bash
+# Evaluate specific loss type at specific scale
+python src/evaluate_guidance.py --loss_type disc --guidance_scale 2.0 --num_samples 100
+
+# Evaluate across multiple scales
+python src/evaluate_guidance.py --loss_type disc --scales 0.5 1.0 2.0 5.0
+
+# Compare all loss types at same scale
+python src/evaluate_guidance.py --eval_all --guidance_scale 2.0
+```
+
+Results saved to `outputs/evaluation/` as JSON + sample visualizations.
 
 ## Project Structure
 
@@ -117,7 +145,8 @@ ratio-guidance-light/
 ├── src/
 │   ├── models/
 │   │   ├── unet.py       # UNet for DDPM
-│   │   └── ratio_estimator.py  # Density-ratio network
+│   │   ├── ratio_estimator.py  # Density-ratio network
+│   │   └── classifier.py       # MNIST classifier for evaluation
 │   ├── data/
 │   │   └── mnist_dataset.py    # MNIST loaders
 │   ├── utils/
@@ -126,8 +155,10 @@ ratio-guidance-light/
 │   │   └── trainer.py         # Training utilities
 │   ├── train_diffusion.py     # Train DDPM models
 │   ├── train_ratio.py         # Train ratio estimators
+│   ├── train_classifier.py    # Train classifiers for evaluation
 │   ├── sample.py              # Guided sampling
-│   └── visualize_diffusion_samples.py  # Visualize trained models
+│   ├── visualize_diffusion_samples.py  # Visualize trained models
+│   └── evaluate_guidance.py   # Quantitative evaluation
 └── README.md
 ```
 

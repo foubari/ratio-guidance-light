@@ -154,13 +154,18 @@ class DensityRatioLoss(nn.Module):
 
         elif self.loss_type == "dv":
             # Donsker-Varadhan MI estimator
-            E_q_T = T_real.mean()
+            # Clamp scores to prevent numerical overflow
+            T_real_clamp = torch.clamp(T_real, min=-20.0, max=20.0)
+            T_fake_clamp = torch.clamp(T_fake, min=-20.0, max=20.0)
+            
+            E_q_T = T_real_clamp.mean()
 
             # Compute log(E_r[exp(T)])
             if self.dv_use_ema and self.training:
                 with torch.no_grad():
-                    exp_t_fake = T_fake.exp().mean()
+                    exp_t_fake = T_fake_clamp.exp().mean()
                     if not self.dv_ema_initialized:
+                        self.dv_ema_exp_t = self.dv_ema_exp_t.to(exp_t_fake.device)
                         self.dv_ema_exp_t.copy_(exp_t_fake)
                         self.dv_ema_initialized.fill_(True)
                     else:
@@ -169,7 +174,7 @@ class DensityRatioLoss(nn.Module):
                         )
                 log_E_r_exp_T = self.dv_ema_exp_t.clamp(min=EPS).log()
             else:
-                log_E_r_exp_T = self.log_mean_exp(T_fake)
+                log_E_r_exp_T = self.log_mean_exp(T_fake_clamp)
 
             # DV bound (MI lower bound)
             dv_bound = E_q_T - log_E_r_exp_T
