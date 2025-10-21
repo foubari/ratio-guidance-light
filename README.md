@@ -114,17 +114,21 @@ Outputs will be saved to `outputs/`.
 Compute matching accuracy (% of generated pairs with same digit label):
 
 ```bash
-# Evaluate specific loss type at specific scale
+# Quick evaluation: single configuration
 python src/evaluate_guidance.py --loss_type disc --guidance_scale 2.0 --num_samples 100
 
-# Evaluate across multiple scales
-python src/evaluate_guidance.py --loss_type disc --scales 0.5 1.0 2.0 5.0
-
-# Compare all loss types at same scale
-python src/evaluate_guidance.py --eval_all --guidance_scale 2.0
+# Comprehensive sweep: all methods across multiple scales + plots
+python src/run_evaluation_sweep.py
 ```
 
-Results saved to `outputs/evaluation/` as JSON + sample visualizations.
+The sweep script automatically:
+- Tests all trained ratio models
+- Evaluates scales from 2.0 to 10.0
+- Saves results as JSON
+- Generates comparison plots (accuracy vs scale)
+- Prints summary table
+
+Results saved to `outputs/evaluation_sweep/` with plots and consolidated JSON.
 
 ## Project Structure
 

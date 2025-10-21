@@ -93,40 +93,53 @@ Compares all trained ratio estimators at the same guidance scale.
 - Over-guidance causing artifacts
 - Ratio estimator becoming unreliable
 
-## Batch Evaluation Script
+## Comprehensive Evaluation Sweep
 
-Evaluate all combinations systematically:
+For systematic evaluation across all methods and scales, use the automated sweep script:
 
 ```bash
-# Create evaluation script
-cat > evaluate_all.sh << 'EOF'
-#!/bin/bash
+# Run full evaluation sweep (scales 2.0 to 10.0)
+python src/run_evaluation_sweep.py
 
-LOSS_TYPES="disc dv ulsif rulsif kliep"
-SCALES="0.5 1.0 2.0 5.0"
+# Custom scales
+python src/run_evaluation_sweep.py --scales 1.0 2.0 3.0 5.0 7.0 10.0
 
-for loss in $LOSS_TYPES; do
-    if [ -f "checkpoints/ratio/$loss/best_model.pt" ]; then
-        echo "Evaluating $loss..."
-        python src/evaluate_guidance.py \
-            --loss_type $loss \
-            --scales $SCALES \
-            --num_samples 200
-    fi
-done
+# More samples for better statistics
+python src/run_evaluation_sweep.py --num_samples 200
 
-# Compare all at scale 2.0
-python src/evaluate_guidance.py --eval_all --guidance_scale 2.0 --num_samples 200
-EOF
-
-chmod +x evaluate_all.sh
-./evaluate_all.sh
+# Specific loss types only
+python src/run_evaluation_sweep.py --loss_types disc rulsif
 ```
+
+This script automatically:
+- Evaluates all available ratio models
+- Tests multiple guidance scales
+- Saves results to JSON
+- Generates comparison plots
+- Prints summary table
 
 ## Output Files
 
+### Evaluation Sweep Outputs
+
+After running `run_evaluation_sweep.py`, you'll get:
+
+```
+outputs/evaluation_sweep/
+├── sweep_results.json              # Consolidated results for all methods/scales
+├── accuracy_vs_scale.png           # Main comparison plot
+├── accuracy_vs_scale.pdf           # Publication-quality version
+├── relative_performance.png        # Performance gap from best method
+└── individual_results/             # Detailed results per configuration
+    ├── disc_scale2.0_results.json
+    ├── disc_scale2.0_samples.png
+    ├── disc_scale5.0_results.json
+    └── ...
+```
+
 ### JSON Results Format
 
+Individual result file:
 ```json
 {
   "loss_type": "disc",
@@ -135,6 +148,24 @@ chmod +x evaluate_all.sh
   "accuracy": 82.5,
   "num_matches": 82,
   "total_samples": 100
+}
+```
+
+Consolidated sweep results:
+```json
+{
+  "disc": {
+    "2.0": 75.5,
+    "3.0": 80.2,
+    "5.0": 85.0,
+    "10.0": 87.5
+  },
+  "rulsif": {
+    "2.0": 73.0,
+    "3.0": 78.5,
+    "5.0": 82.0,
+    "10.0": 84.5
+  }
 }
 ```
 
