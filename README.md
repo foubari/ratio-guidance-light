@@ -146,6 +146,12 @@ ratio-guidance-light/
 - Training data:
   - Real pairs: Same digit in standard and rotated form, noised to same t
   - Fake pairs: Random shuffling of standard/rotated samples
+  
+**Note on Implementation:** This implementation uses a **simplified approach** for generating fake pairs compared to the original MMDisCo paper. Instead of generating fake pairs by running full diffusion sampling from the pre-trained models (which would be `x' ~ p_φ(x)` and `y' ~ p_ψ(y)`), we use **random shuffling of the real dataset** to approximate the product of marginals `p(x) · p(y)`. This is a pragmatic simplification that:
+- ✅ Is computationally much faster (no expensive sampling required)
+- ✅ Works well when diffusion models are well-trained (as they approximate the true distribution)
+- ✅ Is commonly used in practice for educational/simplified implementations
+- ⚠️ May differ slightly from the theoretical framework if the pre-trained models have distributional biases
 
 ### Loss Functions
 | Loss | Objective | Use Case |

@@ -113,11 +113,17 @@ class DiffusionSchedule:
         x0_pred = torch.clamp(x0_pred, -1.0, 1.0)
 
         # Compute mean of q(x_{t-1} | x_t, x_0)
-        sqrt_recip_alpha_t = self.sqrt_recip_alphas[t][:, None, None, None]
+        # Use x0_pred for the mean computation (DDPM formula)
+        alpha_bar_t = self.alphas_cumprod[t][:, None, None, None]
+        alpha_bar_t_prev = self.alphas_cumprod_prev[t][:, None, None, None]
         beta_t = self.betas[t][:, None, None, None]
-        sqrt_recipm1_alpha_bar_t = self.sqrt_recipm1_alphas_cumprod[t][:, None, None, None]
 
-        mean = sqrt_recip_alpha_t * (x_t - beta_t * noise_pred / sqrt_recipm1_alpha_bar_t)
+        # Compute coefficients
+        coef1 = torch.sqrt(alpha_bar_t_prev) * beta_t / (1.0 - alpha_bar_t)
+        coef2 = torch.sqrt(self.alphas[t][:, None, None, None]) * (1.0 - alpha_bar_t_prev) / (1.0 - alpha_bar_t)
+
+        # Posterior mean: mu = coef1 * x0_pred + coef2 * x_t
+        mean = coef1 * x0_pred + coef2 * x_t
 
         # Add noise (except at t=0)
         if t[0] > 0:
