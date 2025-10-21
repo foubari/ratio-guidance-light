@@ -10,6 +10,7 @@ import torch
 import torch.nn.functional as F
 from pathlib import Path
 from tqdm import tqdm
+import torchvision.utils as vutils
 
 from models.unet import UNet
 from data.mnist_dataset import get_diffusion_dataloader
@@ -45,9 +46,12 @@ def train_ddpm(
     print(f"Device: {device}")
     print(f"Epochs: {epochs}, Batch size: {batch_size}, Learning rate: {lr}")
 
-    # Create save directory
+    # Create save directories
     save_path = Path(save_dir) / dataset_type
     save_path.mkdir(parents=True, exist_ok=True)
+
+    samples_path = save_path / 'samples'
+    samples_path.mkdir(exist_ok=True)
 
     # Model
     model = UNet(in_channels=1, out_channels=1).to(device)
@@ -130,6 +134,26 @@ def train_ddpm(
         avg_val_loss = sum(val_losses) / len(val_losses)
 
         print(f'Epoch {epoch+1}/{epochs} - Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}')
+
+        # Generate and save samples every 10 epochs
+        if (epoch + 1) % 10 == 0 or epoch == 0:
+            print(f'  -> Generating samples...')
+            model.eval()
+            with torch.no_grad():
+                samples = schedule.sample(
+                    model=model,
+                    shape=(16, 1, 28, 28),
+                    device=device
+                )
+                sample_file = samples_path / f'epoch_{epoch+1}.png'
+                vutils.save_image(
+                    samples,
+                    sample_file,
+                    nrow=4,
+                    normalize=True,
+                    value_range=(-1, 1)
+                )
+                print(f'  -> Saved samples to {sample_file}')
 
         # Save best model
         if avg_val_loss < best_val_loss:

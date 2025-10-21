@@ -53,6 +53,20 @@ python src/train_diffusion.py --dataset rotated --epochs 50
 
 Models will be saved to `checkpoints/diffusion/`.
 
+**During training:**
+- Samples are generated every 10 epochs and saved to `checkpoints/diffusion/{dataset}/samples/`
+- Checkpoints are saved every 10 epochs
+- Best model is saved when validation loss improves
+
+**After training, visualize samples:**
+```bash
+# Generate samples from both models
+python src/visualize_diffusion_samples.py
+
+# Generate from specific model
+python src/visualize_diffusion_samples.py --dataset standard --num_samples 64
+```
+
 ### 2. Train Ratio Estimators
 
 Train density-ratio estimators with different loss functions:
@@ -112,7 +126,8 @@ ratio-guidance-light/
 │   │   └── trainer.py         # Training utilities
 │   ├── train_diffusion.py     # Train DDPM models
 │   ├── train_ratio.py         # Train ratio estimators
-│   └── sample.py              # Guided sampling
+│   ├── sample.py              # Guided sampling
+│   └── visualize_diffusion_samples.py  # Visualize trained models
 └── README.md
 ```
 
