@@ -47,49 +47,97 @@ class RatioTrainer:
 
         batch_size = img1.shape[0]
 
-        # Separate real and fake pairs
-        real_mask = is_real > 0.5
-        fake_mask = ~real_mask
+        # InfoNCE: special handling - use only real pairs to construct (B, B) matrix
+        if self.loss_fn.loss_type == "infonce":
+            # Filter to only real pairs
+            real_mask = is_real > 0.5
+            if real_mask.sum() == 0:
+                return {'loss': 0.0, 'skipped': True}
 
-        # Skip if we don't have both real and fake samples
-        if real_mask.sum() == 0 or fake_mask.sum() == 0:
-            return {'loss': 0.0, 'skipped': True}
+            img1_real = img1[real_mask]  # [B', 1, 28, 28]
+            img2_real = img2[real_mask]  # [B', 1, 28, 28]
+            B = len(img1_real)
 
-        img1_real = img1[real_mask]
-        img2_real = img2[real_mask]
-        img1_fake = img1[fake_mask]
-        img2_fake = img2[fake_mask]
+            # Sample single timestep for entire batch (same t for all pairs)
+            t = torch.randint(0, self.schedule.num_timesteps, (1,), device=self.device).item()
+            t_batch = torch.full((B,), t, device=self.device, dtype=torch.long)
 
-        # Sample timesteps
-        t_real = torch.randint(0, self.schedule.num_timesteps, (len(img1_real),), device=self.device)
-        t_fake = torch.randint(0, self.schedule.num_timesteps, (len(img1_fake),), device=self.device)
+            # Add noise
+            img1_noisy, _ = self.schedule.add_noise(img1_real, t_batch)
+            img2_noisy, _ = self.schedule.add_noise(img2_real, t_batch)
 
-        # Add noise to both images at the same timestep
-        img1_real_noisy, _ = self.schedule.add_noise(img1_real, t_real)
-        img2_real_noisy, _ = self.schedule.add_noise(img2_real, t_real)
+            # Compute score matrix T[i,j] = T(x_i, y_j, t) for all i,j
+            # Expand: img1[i] with all img2[j]
+            T_mat = torch.zeros(B, B, device=self.device)
+            for i in range(B):
+                # Replicate img1[i] B times
+                x_i = img1_noisy[i:i+1].expand(B, -1, -1, -1)  # [B, 1, 28, 28]
+                # All img2[j]
+                y_all = img2_noisy  # [B, 1, 28, 28]
+                # Timestep
+                t_all = t_batch  # [B]
+                # Compute scores
+                T_mat[i, :] = self.model(x_i, y_all, t_all).squeeze()  # [B]
 
-        img1_fake_noisy, _ = self.schedule.add_noise(img1_fake, t_fake)
-        img2_fake_noisy, _ = self.schedule.add_noise(img2_fake, t_fake)
+            # Compute InfoNCE loss
+            loss, metrics = self.loss_fn(T_mat)
 
-        # Forward pass through ratio estimator
-        scores_real = self.model(img1_real_noisy, img2_real_noisy, t_real)
-        scores_fake = self.model(img1_fake_noisy, img2_fake_noisy, t_fake)
+            # Backward pass
+            self.optimizer.zero_grad()
+            loss.backward()
+            self.optimizer.step()
 
-        # Compute loss
-        loss, metrics = self.loss_fn(scores_real, scores_fake)
+            # Add metadata
+            metrics['loss'] = loss.item()
+            metrics['t_mean'] = t
+            metrics['batch_size'] = B
 
-        # Backward pass
-        self.optimizer.zero_grad()
-        loss.backward()
-        self.optimizer.step()
+            return metrics
 
-        # Add metadata to metrics
-        metrics['loss'] = loss.item()
-        metrics['t_mean'] = (t_real.float().mean().item() + t_fake.float().mean().item()) / 2
-        metrics['num_real'] = len(img1_real)
-        metrics['num_fake'] = len(img1_fake)
+        # Standard methods: separate real/fake pairs
+        else:
+            real_mask = is_real > 0.5
+            fake_mask = ~real_mask
 
-        return metrics
+            # Skip if we don't have both real and fake samples
+            if real_mask.sum() == 0 or fake_mask.sum() == 0:
+                return {'loss': 0.0, 'skipped': True}
+
+            img1_real = img1[real_mask]
+            img2_real = img2[real_mask]
+            img1_fake = img1[fake_mask]
+            img2_fake = img2[fake_mask]
+
+            # Sample timesteps
+            t_real = torch.randint(0, self.schedule.num_timesteps, (len(img1_real),), device=self.device)
+            t_fake = torch.randint(0, self.schedule.num_timesteps, (len(img1_fake),), device=self.device)
+
+            # Add noise to both images at the same timestep
+            img1_real_noisy, _ = self.schedule.add_noise(img1_real, t_real)
+            img2_real_noisy, _ = self.schedule.add_noise(img2_real, t_real)
+
+            img1_fake_noisy, _ = self.schedule.add_noise(img1_fake, t_fake)
+            img2_fake_noisy, _ = self.schedule.add_noise(img2_fake, t_fake)
+
+            # Forward pass through ratio estimator
+            scores_real = self.model(img1_real_noisy, img2_real_noisy, t_real)
+            scores_fake = self.model(img1_fake_noisy, img2_fake_noisy, t_fake)
+
+            # Compute loss
+            loss, metrics = self.loss_fn(scores_real, scores_fake)
+
+            # Backward pass
+            self.optimizer.zero_grad()
+            loss.backward()
+            self.optimizer.step()
+
+            # Add metadata to metrics
+            metrics['loss'] = loss.item()
+            metrics['t_mean'] = (t_real.float().mean().item() + t_fake.float().mean().item()) / 2
+            metrics['num_real'] = len(img1_real)
+            metrics['num_fake'] = len(img1_fake)
+
+            return metrics
 
     def train_epoch(self, dataloader, epoch, total_epochs):
         """

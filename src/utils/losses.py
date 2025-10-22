@@ -1,6 +1,6 @@
 """
 Density-ratio learning losses for PMI estimation.
-Implements 5 different loss functions: Discriminator, DV, uLSIF, RuLSIF, KLIEP.
+Implements 6 different loss functions: Discriminator, DV, uLSIF, RuLSIF, KLIEP, InfoNCE.
 
 Based on the original ratio_guidance implementation but simplified.
 """
@@ -21,11 +21,18 @@ class DensityRatioLoss(nn.Module):
       - "ulsif"   : uLSIF (unconstrained Least-Squares). Optimal ratio w ~ q/r
       - "rulsif"  : Relative uLSIF with alpha-divergence
       - "kliep"   : KLIEP (KL). Optimal ratio w ~ q/r
+      - "infonce" : Symmetric InfoNCE. Learns PMI = log(q(x,y)/(q(x)q(y))) + const
+                    WARNING: Valid only in-domain (test marginals = train marginals)
 
     API:
       forward(T_real, T_fake) -> (loss, metrics)
-        T_real: (B,) = T(x_i, y_i) on true joint q(x,y)
-        T_fake: (B,) = T(x'_j, y'_j) on reference r(x,y)=p(x)p(y)
+        Standard methods (disc/dv/ulsif/rulsif/kliep):
+          T_real: (B,) = T(x_i, y_i) on true joint q(x,y)
+          T_fake: (B,) = T(x'_j, y'_j) on reference r(x,y)=p(x)p(y)
+
+        InfoNCE only:
+          T_real: (B, B) = T_mat where T_mat[i,j] = T(x_i, y_j, t)
+          T_fake: ignored (can be None)
     """
 
     def __init__(
@@ -46,12 +53,17 @@ class DensityRatioLoss(nn.Module):
         rulsif_alpha: float = 0.2,
         rulsif_link: str = "exp",          # 'exp' | 'softplus' | 'identity'
         rulsif_norm_penalty: float = 0.0,
-        rulsif_softplus_eps: float = 1e-6
+        rulsif_softplus_eps: float = 1e-6,
+        # InfoNCE settings
+        infonce_tau: float = 0.07          # temperature for InfoNCE
     ):
         super().__init__()
-        assert loss_type in {"disc", "dv", "ulsif", "rulsif", "kliep"}
+        assert loss_type in {"disc", "dv", "ulsif", "rulsif", "kliep", "infonce"}
         self.loss_type = loss_type
         self.use_exp_w = use_exp_w
+
+        # InfoNCE parameters
+        self.infonce_tau = infonce_tau
 
         # DV parameters
         self.dv_use_ema = dv_use_ema
@@ -126,18 +138,65 @@ class DensityRatioLoss(nn.Module):
 
         return w_alpha
 
-    def forward(self, T_real: torch.Tensor, T_fake: torch.Tensor):
+    def forward(self, T_real: torch.Tensor, T_fake: torch.Tensor = None):
         """
         Args:
-            T_real: (B,) = T(x_i, y_i) on true joint q(x,y)
-            T_fake: (B,) = T(x'_j, y'_j) on reference r(x,y)
+            T_real: For standard methods: (B,) = T(x_i, y_i) on true joint q(x,y)
+                    For InfoNCE: (B, B) = T_mat where T_mat[i,j] = T(x_i, y_j, t)
+            T_fake: For standard methods: (B,) = T(x'_j, y'_j) on reference r(x,y)
+                    For InfoNCE: ignored (can be None)
         Returns:
             loss: scalar tensor to minimize
             metrics: dict of metrics for monitoring
         """
-        assert T_real.dim() == 1 and T_fake.dim() == 1, "Pass 1-D tensors of scalar outputs"
-
         metrics = {}
+
+        # InfoNCE has special input format: T_real is a (B, B) matrix
+        if self.loss_type == "infonce":
+            assert T_real.dim() == 2 and T_real.size(0) == T_real.size(1), \
+                "InfoNCE requires T_real to be (B, B) matrix"
+
+            # Symmetric InfoNCE loss
+            # Formula: -1/B Σ_i [log(exp(S_ii) / Σ_j exp(S_ij)) + log(exp(S_ii) / Σ_j exp(S_ji))]
+            # where S_ij = T(x_i, y_j, t) / τ
+
+            B = T_real.size(0)
+            S = T_real / self.infonce_tau  # (B, B) scaled scores
+
+            # Row-wise softmax: log p(i|x_i) for each row i
+            # log(exp(S_ii) / Σ_j exp(S_ij)) = S_ii - logsumexp_j(S_ij)
+            log_prob_rows = S.diagonal() - torch.logsumexp(S, dim=1)  # (B,)
+
+            # Column-wise softmax: log p(i|y_i) for each column i
+            # log(exp(S_ii) / Σ_j exp(S_ji)) = S_ii - logsumexp_j(S_ji)
+            log_prob_cols = S.diagonal() - torch.logsumexp(S, dim=0)  # (B,)
+
+            # Symmetric InfoNCE: average both directions
+            loss = -(log_prob_rows.mean() + log_prob_cols.mean()) / 2.0
+
+            # Metrics
+            with torch.no_grad():
+                diag_scores = S.diagonal().mean().item()
+                off_diag_mask = ~torch.eye(B, dtype=torch.bool, device=S.device)
+                off_diag_scores = S[off_diag_mask].mean().item()
+                accuracy_rows = (S.argmax(dim=1) == torch.arange(B, device=S.device)).float().mean().item()
+                accuracy_cols = (S.argmax(dim=0) == torch.arange(B, device=S.device)).float().mean().item()
+
+            metrics.update({
+                "infonce_loss": loss.detach().item(),
+                "tau": self.infonce_tau,
+                "S_diag_mean": diag_scores,
+                "S_offdiag_mean": off_diag_scores,
+                "diag_vs_offdiag": diag_scores - off_diag_scores,
+                "accuracy_rows": accuracy_rows,
+                "accuracy_cols": accuracy_cols,
+                "accuracy_avg": (accuracy_rows + accuracy_cols) / 2.0,
+            })
+
+            return loss, metrics
+
+        # Standard methods: check for 1-D tensors
+        assert T_real.dim() == 1 and T_fake.dim() == 1, "Pass 1-D tensors of scalar outputs"
 
         if self.loss_type == "disc":
             # Discriminator (BCE with logits)
@@ -351,16 +410,22 @@ if __name__ == "__main__":
     batch_size = 32
 
     # Test each loss type
-    for loss_type in ["disc", "dv", "ulsif", "rulsif", "kliep"]:
+    for loss_type in ["disc", "dv", "ulsif", "rulsif", "kliep", "infonce"]:
         print(f"\nTesting {loss_type}:")
 
         loss_fn = DensityRatioLoss(loss_type=loss_type)
 
-        # Simulate scores
-        T_real = torch.randn(batch_size)  # Scores on real pairs
-        T_fake = torch.randn(batch_size)  # Scores on fake pairs
-
-        loss, metrics = loss_fn(T_real, T_fake)
+        if loss_type == "infonce":
+            # InfoNCE uses a (B, B) matrix
+            T_mat = torch.randn(batch_size, batch_size)  # Score matrix T[i,j] = T(x_i, y_j)
+            # Make diagonal larger to simulate positive pairs
+            T_mat = T_mat + torch.eye(batch_size) * 2.0
+            loss, metrics = loss_fn(T_mat)
+        else:
+            # Standard methods use 1-D tensors
+            T_real = torch.randn(batch_size)  # Scores on real pairs
+            T_fake = torch.randn(batch_size)  # Scores on fake pairs
+            loss, metrics = loss_fn(T_real, T_fake)
 
         print(f"  Loss: {loss.item():.4f}")
         print(f"  Metrics: {list(metrics.keys())}")

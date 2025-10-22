@@ -18,9 +18,10 @@ The key idea: Train two separate diffusion models (one on standard MNIST, one on
 
 - Clean, educational codebase focused on core concepts
 - MNIST-based (28x28 images) for fast experimentation
-- 5 different density-ratio objectives: Discriminator, DV, uLSIF, RuLSIF, KLIEP
+- **6 different density-ratio objectives:** Discriminator, DV, uLSIF, RuLSIF, KLIEP, InfoNCE
 - Separate training scripts for diffusion models and ratio estimators
 - Guided sampling with adjustable guidance scale
+- Quantitative evaluation with matching accuracy metric
 
 ## Installation
 
@@ -80,9 +81,18 @@ python src/train_ratio.py --loss_type dv --epochs 30
 python src/train_ratio.py --loss_type ulsif --epochs 30
 python src/train_ratio.py --loss_type rulsif --epochs 30
 python src/train_ratio.py --loss_type kliep --epochs 30
+
+# InfoNCE (symmetric contrastive learning)
+python src/train_ratio.py --loss_type infonce --epochs 30
 ```
 
 Models will be saved to `checkpoints/ratio/<loss_type>/`.
+
+**⚠️ Important note about InfoNCE:**
+- InfoNCE learns the **PMI** (Pointwise Mutual Information): log(q(x,y) / (q(x)q(y))) + const
+- This is valid for guidance **only when test marginals = train marginals** (in-domain)
+- For out-of-domain guidance (e.g., different diffusion models at test time), use Discriminator/DV/uLSIF/RuLSIF/KLIEP instead
+- InfoNCE uses only real pairs (ignores the fake pairs in the dataset)
 
 ### 3. Train Classifiers (for Evaluation)
 
@@ -139,12 +149,14 @@ ratio-guidance-light/
 │   ├── diffusion/         # DDPM checkpoints
 │   │   ├── standard/      # Standard MNIST model
 │   │   └── rotated/       # Rotated MNIST model
-│   └── ratio/             # Ratio estimator checkpoints
-│       ├── disc/          # Discriminator loss
-│       ├── dv/            # Donsker-Varadhan loss
-│       ├── ulsif/         # uLSIF loss
-│       ├── rulsif/        # RuLSIF loss
-│       └── kliep/         # KLIEP loss
+│   ├── ratio/             # Ratio estimator checkpoints
+│   │   ├── disc/          # Discriminator loss
+│   │   ├── dv/            # Donsker-Varadhan loss
+│   │   ├── ulsif/         # uLSIF loss
+│   │   ├── rulsif/        # RuLSIF loss
+│   │   ├── kliep/         # KLIEP loss
+│   │   └── infonce/       # InfoNCE loss (PMI, in-domain only)
+│   └── classifiers/       # MNIST classifiers for evaluation
 ├── outputs/               # Generated samples
 ├── src/
 │   ├── models/
@@ -189,13 +201,20 @@ ratio-guidance-light/
 - ⚠️ May differ slightly from the theoretical framework if the pre-trained models have distributional biases
 
 ### Loss Functions
-| Loss | Objective | Use Case |
-|------|-----------|----------|
-| **Discriminator** | Binary classification | Most stable, recommended for beginners |
-| **DV** | Mutual information lower bound | Theoretical connections to MI |
-| **uLSIF** | Least-squares density ratio | Direct ratio estimation |
-| **RuLSIF** | Relative uLSIF | More stable with hyperparameter alpha |
-| **KLIEP** | KL importance estimation | KL-based objective |
+| Loss | Objective | Use Case | Notes |
+|------|-----------|----------|-------|
+| **Discriminator** | Binary classification (q/r) | Most stable, recommended for beginners | General-purpose |
+| **DV** | Mutual information lower bound | Theoretical connections to MI | General-purpose |
+| **uLSIF** | Least-squares density ratio | Direct ratio estimation | General-purpose |
+| **RuLSIF** | Relative uLSIF | More stable with hyperparameter alpha | General-purpose |
+| **KLIEP** | KL importance estimation | KL-based objective | General-purpose |
+| **InfoNCE** | Symmetric contrastive (PMI) | Contrastive learning approach | ⚠️ **In-domain only** |
+
+**⚠️ InfoNCE Limitation:**
+- InfoNCE learns PMI: `log(q(x,y) / (q(x)q(y)))`
+- At inference, this gives correct gradient **only if test marginals = train marginals**
+- In this MNIST setup, both diffusion models are trained on the same data distribution → InfoNCE is valid
+- For out-of-domain guidance or distribution shift, use Discriminator/DV/uLSIF instead (they target `q/r` directly)
 
 ## Usage Examples
 
@@ -215,7 +234,7 @@ python src/sample.py --dataset standard --guided --guidance_scale 5.0
 ### Compare Different Loss Functions
 
 ```bash
-for loss in disc dv ulsif rulsif kliep; do
+for loss in disc dv ulsif rulsif kliep infonce; do
     python src/sample.py --dataset standard --guided \
         --loss_type $loss --guidance_scale 2.0
 done

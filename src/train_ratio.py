@@ -7,6 +7,7 @@ Usage:
     python src/train_ratio.py --loss_type ulsif --epochs 30
     python src/train_ratio.py --loss_type rulsif --epochs 30
     python src/train_ratio.py --loss_type kliep --epochs 30
+    python src/train_ratio.py --loss_type infonce --epochs 30
 """
 import argparse
 import torch
@@ -29,22 +30,24 @@ def train_ratio_estimator(
     device='cuda',
     save_dir='checkpoints/ratio',
     num_workers=4,
-    patience=5
+    patience=5,
+    resume_from=None
 ):
     """
     Train density-ratio estimator.
 
     Args:
-        loss_type: One of ['disc', 'dv', 'ulsif', 'rulsif', 'kliep']
+        loss_type: One of ['disc', 'dv', 'ulsif', 'rulsif', 'kliep', 'infonce']
         epochs: Number of training epochs
         batch_size: Batch size
         lr: Learning rate
-        real_fake_ratio: Ratio of real to fake pairs in training data
+        real_fake_ratio: Ratio of real to fake pairs in training data (InfoNCE uses only real pairs)
         num_timesteps: Number of diffusion timesteps
         device: Device to train on
         save_dir: Directory to save checkpoints
         num_workers: Number of data loading workers
         patience: Early stopping patience
+        resume_from: Path to checkpoint to resume from (e.g., 'checkpoint_epoch_30.pt')
     """
     # Setup
     device = torch.device(device if torch.cuda.is_available() else 'cpu')
@@ -66,6 +69,25 @@ def train_ratio_estimator(
 
     # Optimizer
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    
+    # Resume from checkpoint if specified
+    start_epoch = 0
+    best_val_loss = float('inf')
+    if resume_from is not None:
+        checkpoint_path = save_path / resume_from
+        if checkpoint_path.exists():
+            print(f"\nResuming from checkpoint: {checkpoint_path}")
+            checkpoint = torch.load(checkpoint_path, map_location=device)
+            model.load_state_dict(checkpoint['model_state_dict'])
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            start_epoch = checkpoint['epoch'] + 1
+            best_val_loss = checkpoint.get('val_metrics', {}).get('loss', float('inf'))
+            print(f"Resumed from epoch {checkpoint['epoch'] + 1}")
+            print(f"Previous best val loss: {best_val_loss:.4f}")
+        else:
+            print(f"Warning: Checkpoint {checkpoint_path} not found. Starting from scratch.")
+    else:
+        best_val_loss = float('inf')
 
     # Diffusion schedule
     schedule = DiffusionSchedule(num_timesteps=num_timesteps, device=device)
@@ -94,10 +116,9 @@ def train_ratio_estimator(
     )
 
     # Training loop
-    best_val_loss = float('inf')
     patience_counter = 0
 
-    for epoch in range(epochs):
+    for epoch in range(start_epoch, epochs):
         # Train
         train_metrics = trainer.train_epoch(train_loader, epoch, epochs)
 
@@ -117,10 +138,14 @@ def train_ratio_estimator(
             print(f'  DV Bound (train): {train_metrics.get("dv_bound", 0):.4f}')
             print(f'  DV Bound (val): {val_metrics.get("dv_bound", 0):.4f}')
         elif loss_type in ['ulsif', 'rulsif']:
-            print(f'  E_q[w] (train): {train_metrics.get("E_q_w", train_metrics.get("E_q_r_alpha", 0)):.4f}')
-            print(f'  E_r[w] (train): {train_metrics.get("E_r_w", train_metrics.get("E_r_r_alpha", 0)):.4f}')
+            print(f'  E_q[w] (train): {train_metrics.get("E_q_w", train_metrics.get("E_q_w_alpha", 0)):.4f}')
+            print(f'  E_r[w] (train): {train_metrics.get("E_r_w", train_metrics.get("E_r_w_alpha", 0)):.4f}')
         elif loss_type == 'kliep':
             print(f'  Constraint residual (train): {train_metrics.get("constraint_resid", 0):.4f}')
+        elif loss_type == 'infonce':
+            print(f'  Train Accuracy: {train_metrics.get("accuracy_avg", 0):.4f}')
+            print(f'  Val Accuracy: {val_metrics.get("accuracy_avg", 0):.4f}')
+            print(f'  Diag vs Off-diag (train): {train_metrics.get("diag_vs_offdiag", 0):.4f}')
 
         # Save best model
         if val_metrics['loss'] < best_val_loss:
@@ -169,7 +194,7 @@ def train_ratio_estimator(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Train density-ratio estimator')
     parser.add_argument('--loss_type', type=str,
-                       choices=['disc', 'dv', 'ulsif', 'rulsif', 'kliep'],
+                       choices=['disc', 'dv', 'ulsif', 'rulsif', 'kliep', 'infonce'],
                        required=True,
                        help='Loss type for density-ratio estimation')
     parser.add_argument('--epochs', type=int, default=30,
@@ -190,6 +215,8 @@ if __name__ == "__main__":
                        help='Number of data loading workers (default: 4)')
     parser.add_argument('--patience', type=int, default=5,
                        help='Early stopping patience (default: 5)')
+    parser.add_argument('--resume_from', type=str, default=None,
+                       help='Checkpoint filename to resume from (e.g., checkpoint_epoch_30.pt)')
 
     args = parser.parse_args()
 
@@ -203,5 +230,6 @@ if __name__ == "__main__":
         device=args.device,
         save_dir=args.save_dir,
         num_workers=args.num_workers,
-        patience=args.patience
+        patience=args.patience,
+        resume_from=args.resume_from
     )
