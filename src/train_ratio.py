@@ -31,7 +31,13 @@ def train_ratio_estimator(
     save_dir='checkpoints/ratio',
     num_workers=4,
     patience=5,
-    resume_from=None
+    resume_from=None,
+    # Loss-specific hyperparameters
+    rulsif_alpha=0.2,
+    kliep_lambda=1.0,
+    infonce_tau=0.07,
+    ulsif_l2=0.0,
+    weight_decay=0.0
 ):
     """
     Train density-ratio estimator.
@@ -48,6 +54,11 @@ def train_ratio_estimator(
         num_workers: Number of data loading workers
         patience: Early stopping patience
         resume_from: Path to checkpoint to resume from (e.g., 'checkpoint_epoch_30.pt')
+        rulsif_alpha: Alpha parameter for RuLSIF (default: 0.2)
+        kliep_lambda: Lambda for KLIEP normalization penalty (default: 1.0)
+        infonce_tau: Temperature for InfoNCE (default: 0.07)
+        ulsif_l2: L2 regularization for uLSIF (default: 0.0, prefer weight_decay)
+        weight_decay: Weight decay for optimizer (default: 0.0)
     """
     # Setup
     device = torch.device(device if torch.cuda.is_available() else 'cpu')
@@ -64,11 +75,17 @@ def train_ratio_estimator(
     model = RatioEstimator().to(device)
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
 
-    # Loss function
-    loss_fn = DensityRatioLoss(loss_type=loss_type)
+    # Loss function with hyperparameters
+    loss_fn = DensityRatioLoss(
+        loss_type=loss_type,
+        rulsif_alpha=rulsif_alpha,
+        kliep_lambda=kliep_lambda,
+        infonce_tau=infonce_tau,
+        ulsif_l2=ulsif_l2
+    )
 
-    # Optimizer
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    # Optimizer with weight decay
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
     
     # Resume from checkpoint if specified
     start_epoch = 0
@@ -218,6 +235,18 @@ if __name__ == "__main__":
     parser.add_argument('--resume_from', type=str, default=None,
                        help='Checkpoint filename to resume from (e.g., checkpoint_epoch_30.pt)')
 
+    # Loss-specific hyperparameters
+    parser.add_argument('--rulsif_alpha', type=float, default=0.2,
+                       help='Alpha parameter for RuLSIF (default: 0.2)')
+    parser.add_argument('--kliep_lambda', type=float, default=1.0,
+                       help='Lambda parameter for KLIEP normalization penalty (default: 1.0)')
+    parser.add_argument('--infonce_tau', type=float, default=0.07,
+                       help='Temperature parameter for InfoNCE (default: 0.07)')
+    parser.add_argument('--ulsif_l2', type=float, default=0.0,
+                       help='L2 regularization for uLSIF (default: 0.0, use weight_decay instead)')
+    parser.add_argument('--weight_decay', type=float, default=0.0,
+                       help='Weight decay for optimizer (default: 0.0)')
+
     args = parser.parse_args()
 
     train_ratio_estimator(
@@ -231,5 +260,10 @@ if __name__ == "__main__":
         save_dir=args.save_dir,
         num_workers=args.num_workers,
         patience=args.patience,
-        resume_from=args.resume_from
+        resume_from=args.resume_from,
+        rulsif_alpha=args.rulsif_alpha,
+        kliep_lambda=args.kliep_lambda,
+        infonce_tau=args.infonce_tau,
+        ulsif_l2=args.ulsif_l2,
+        weight_decay=args.weight_decay
     )
