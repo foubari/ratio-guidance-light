@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-EPS = 1e-8
+EPS = 1e-3  # Increased to prevent gradient explosion when w→0
 
 
 class DensityRatioLoss(nn.Module):
@@ -107,13 +107,24 @@ class DensityRatioLoss(nn.Module):
         return g
 
     def _rulsif_link_map(self, t: torch.Tensor) -> torch.Tensor:
-        """Map raw outputs to positive r_alpha for RuLSIF"""
+        """
+        Map raw outputs to w_α ∈ (0, 1/α] for RuLSIF.
+        w_α = q / (α*q + (1-α)*r)
+        Default: softplus + clamp for stability
+        """
+        # Apply link function
         if self.rulsif_link == "exp":
-            return torch.exp(torch.clamp(t, max=40.0))
+            w_alpha = torch.exp(torch.clamp(t, max=40.0))
         elif self.rulsif_link == "softplus":
-            return F.softplus(t) + self.rulsif_eps
+            w_alpha = F.softplus(t) + EPS  # Use EPS=1e-3
         else:  # 'identity'
-            return t.clamp(min=self.rulsif_eps)
+            w_alpha = t.clamp(min=EPS)
+
+        # Enforce theoretical bound: w_α < 1/α
+        max_val = (1.0 / self.rulsif_alpha) - EPS
+        w_alpha = w_alpha.clamp(max=max_val)
+
+        return w_alpha
 
     def forward(self, T_real: torch.Tensor, T_fake: torch.Tensor):
         """
@@ -154,12 +165,20 @@ class DensityRatioLoss(nn.Module):
 
         elif self.loss_type == "dv":
             # Donsker-Varadhan MI estimator
+            # Formula: J_DV(T) = E_q[T] - log E_r[exp(T)]
             E_q_T = T_real.mean()
 
-            # Compute log(E_r[exp(T)])
+            # Compute log(E_r[exp(T)]) with mixed differentiable/EMA approach
+            # Clip T before exp to prevent overflow
+            T_fake_clipped = torch.clamp(T_fake, max=10.0)
+
             if self.dv_use_ema and self.training:
+                # Differentiable term for gradient flow
+                log_E_r_exp_T_diff = self.log_mean_exp(T_fake_clipped)
+
+                # EMA term for stability (no gradient)
                 with torch.no_grad():
-                    exp_t_fake = T_fake.exp().mean()
+                    exp_t_fake = T_fake_clipped.exp().mean()
                     if not self.dv_ema_initialized:
                         self.dv_ema_exp_t = self.dv_ema_exp_t.to(exp_t_fake.device)
                         self.dv_ema_exp_t.copy_(exp_t_fake)
@@ -168,9 +187,13 @@ class DensityRatioLoss(nn.Module):
                         self.dv_ema_exp_t.mul_(self.dv_ema_rate).add_(
                             (1 - self.dv_ema_rate) * exp_t_fake
                         )
-                log_E_r_exp_T = self.dv_ema_exp_t.clamp(min=EPS).log()
+                    log_E_r_exp_T_ema = self.dv_ema_exp_t.clamp(min=EPS).log()
+
+                # Mix: (1-β)*differentiable + β*EMA for stability
+                beta = self.dv_ema_rate
+                log_E_r_exp_T = (1 - beta) * log_E_r_exp_T_diff + beta * log_E_r_exp_T_ema
             else:
-                log_E_r_exp_T = self.log_mean_exp(T_fake)
+                log_E_r_exp_T = self.log_mean_exp(T_fake_clipped)
 
             # DV bound (MI lower bound)
             dv_bound = E_q_T - log_E_r_exp_T
@@ -190,91 +213,134 @@ class DensityRatioLoss(nn.Module):
 
         elif self.loss_type == "ulsif":
             # uLSIF (unconstrained Least-Squares Importance Fitting)
+            # Formula: J(w) = 0.5 E_r[w²] - E_q[w] + λ(E_r[w] - 1)²
             w_real = self._w_from_T(T_real)
             w_fake = self._w_from_T(T_fake)
 
-            # Loss: 0.5 * E_r[w^2] - E_q[w]
+            # Core uLSIF loss: 0.5 * E_r[w^2] - E_q[w]
             loss = 0.5 * torch.mean(w_fake ** 2) - torch.mean(w_real)
 
-            if self.ulsif_l2 > 0.0:
-                loss = loss + 0.5 * self.ulsif_l2 * (w_real.pow(2).mean() + w_fake.pow(2).mean())
+            # Calibration constraint: E_r[w] ≈ 1
+            E_r_w = w_fake.mean()
+            calibration_penalty = (E_r_w - 1.0) ** 2
+            loss = loss + 0.1 * calibration_penalty  # λ=0.1 for normalization
+
+            # Note: L2 regularization should be applied via weight_decay in optimizer
+            # not on outputs. Removed incorrect L2 on w.
 
             metrics.update({
                 "ulsif_loss": loss.detach().item(),
                 "E_q_w": w_real.mean().item(),
-                "E_r_w": w_fake.mean().item(),
+                "E_r_w": E_r_w.item(),
                 "E_q_w2": (w_real ** 2).mean().item(),
                 "E_r_w2": (w_fake ** 2).mean().item(),
+                "calibration_penalty": calibration_penalty.item(),
                 "w_real_std": w_real.std().item() if w_real.numel() > 1 else 0,
                 "w_fake_std": w_fake.std().item() if w_fake.numel() > 1 else 0,
             })
 
         elif self.loss_type == "rulsif":
             # Relative uLSIF with alpha-divergence
-            r_real = self._rulsif_link_map(T_real)
-            r_fake = self._rulsif_link_map(T_fake)
+            # Formula: J(w_α) = 0.5 E_mix[w_α²] - E_q[w_α] + λ(E_mix[w_α] - 1)²
+            # where w_α = q/(α*q + (1-α)*r) ∈ (0, 1/α]
+            w_alpha_real = self._rulsif_link_map(T_real)
+            w_alpha_fake = self._rulsif_link_map(T_fake)
 
-            # E_mix[r^2] with mix = alpha*q + (1-alpha)*r
-            Emix_r2 = self.rulsif_alpha * (r_real ** 2).mean() + \
-                      (1.0 - self.rulsif_alpha) * (r_fake ** 2).mean()
-            Eq_r = r_real.mean()
+            # E_mix[w_α^2] with mix = alpha*q + (1-alpha)*r
+            Emix_w2 = self.rulsif_alpha * (w_alpha_real ** 2).mean() + \
+                      (1.0 - self.rulsif_alpha) * (w_alpha_fake ** 2).mean()
+            Eq_w = w_alpha_real.mean()
 
             # RuLSIF loss
-            loss = 0.5 * Emix_r2 - Eq_r
+            loss = 0.5 * Emix_w2 - Eq_w
 
-            # Normalization penalty
-            if self.rulsif_norm_penalty > 0.0:
-                Emix_r = self.rulsif_alpha * r_real.mean() + (1.0 - self.rulsif_alpha) * r_fake.mean()
-                loss = loss + self.rulsif_norm_penalty * (Emix_r - 1.0) ** 2
+            # Normalization penalty: E_mix[w_α] ≈ 1
+            Emix_w = self.rulsif_alpha * w_alpha_real.mean() + \
+                     (1.0 - self.rulsif_alpha) * w_alpha_fake.mean()
+            normalization_penalty = (Emix_w - 1.0) ** 2
 
-            # Compute true density ratio from r_alpha
+            # Always apply normalization for stability
+            loss = loss + 0.1 * normalization_penalty
+
+            # Convert w_α → q/r using exact formula: q/r = (1-α)w_α / (1 - αw_α)
             with torch.no_grad():
-                r_real_clamped = r_real.clamp(max=(1.0 / self.rulsif_alpha) - 1e-6)
-                r_fake_clamped = r_fake.clamp(max=(1.0 / self.rulsif_alpha) - 1e-6)
+                # w_α already clamped to < 1/α in _rulsif_link_map
+                denom_real = (1.0 - self.rulsif_alpha * w_alpha_real).clamp(min=EPS)
+                denom_fake = (1.0 - self.rulsif_alpha * w_alpha_fake).clamp(min=EPS)
 
-                true_r_real = (1 - self.rulsif_alpha) * r_real_clamped / \
-                             (1 - self.rulsif_alpha * r_real_clamped).clamp(min=EPS)
-                true_r_fake = (1 - self.rulsif_alpha) * r_fake_clamped / \
-                             (1 - self.rulsif_alpha * r_fake_clamped).clamp(min=EPS)
+                ratio_real = (1.0 - self.rulsif_alpha) * w_alpha_real / denom_real
+                ratio_fake = (1.0 - self.rulsif_alpha) * w_alpha_fake / denom_fake
 
             metrics.update({
                 "rulsif_loss": loss.detach().item(),
-                "E_q_r_alpha": r_real.mean().item(),
-                "E_r_r_alpha": r_fake.mean().item(),
-                "E_mix_r2": Emix_r2.item(),
+                "E_q_w_alpha": w_alpha_real.mean().item(),
+                "E_r_w_alpha": w_alpha_fake.mean().item(),
+                "E_mix_w2": Emix_w2.item(),
+                "E_mix_w": Emix_w.item(),
+                "normalization_penalty": normalization_penalty.item(),
                 "alpha": self.rulsif_alpha,
-                "true_r_real_mean": true_r_real.mean().item(),
-                "true_r_fake_mean": true_r_fake.mean().item(),
+                "ratio_real_mean": ratio_real.mean().item(),
+                "ratio_fake_mean": ratio_fake.mean().item(),
             })
 
         elif self.loss_type == "kliep":
-            # KLIEP with stabilizers
-            g_real = self._apply_kliep_stabilizers(T_real)
-            g_fake = self._apply_kliep_stabilizers(T_fake)
+            # KLIEP (KL Importance Estimation Procedure)
+            # Canonical form: w = exp(g - A), A = log E_r[exp(g)]
+            # Loss: -E_q[g] + A (exact normalization)
 
-            # Core KLIEP loss: -E_q[log w] with constraint E_r[w] = 1
-            if self.use_exp_w:
-                Eq_logw = g_real.mean()
-                w_fake = torch.exp(torch.clamp(g_fake, max=40.0))
+            # Option 1: Exact canonical form (no stabilizers)
+            if self.kliep_lambda == 0.0:
+                # Canonical KLIEP: -E_q[g] + log E_r[exp(g)]
+                g_real_clipped = torch.clamp(T_real, max=40.0)
+                g_fake_clipped = torch.clamp(T_fake, max=40.0)
+
+                Eq_g = g_real_clipped.mean()
+                log_Er_exp_g = self.log_mean_exp(g_fake_clipped)
+
+                loss = -Eq_g + log_Er_exp_g
+
+                # Compute w for metrics
+                with torch.no_grad():
+                    w_fake = torch.exp(g_fake_clipped - log_Er_exp_g)
+                    Er_w = w_fake.mean()
+
+                metrics.update({
+                    "kliep_loss": loss.detach().item(),
+                    "E_q_g": Eq_g.item(),
+                    "log_Er_exp_g": log_Er_exp_g.item(),
+                    "E_r_w": Er_w.item(),
+                    "mode": "canonical",
+                })
+
+            # Option 2: Penalized form with stabilizers
             else:
-                w_real = F.softplus(g_real) + EPS
-                w_fake = F.softplus(g_fake) + EPS
-                Eq_logw = torch.log(w_real).mean()
+                g_real = self._apply_kliep_stabilizers(T_real)
+                g_fake = self._apply_kliep_stabilizers(T_fake)
 
-            Er_w = w_fake.mean()
+                # Compute w using chosen link function
+                if self.use_exp_w:
+                    Eq_logw = g_real.mean()
+                    w_fake = torch.exp(torch.clamp(g_fake, max=40.0))
+                else:
+                    w_real = F.softplus(g_real) + EPS
+                    w_fake = F.softplus(g_fake) + EPS
+                    Eq_logw = torch.log(w_real.clamp(min=EPS)).mean()
 
-            # Version 1: -E_q[log w] + λ(E_r[w] - 1)^2
-            loss = -Eq_logw + self.kliep_lambda * (Er_w - 1.0) ** 2
+                Er_w = w_fake.mean()
 
-            metrics.update({
-                "kliep_loss": loss.detach().item(),
-                "E_q_logw": Eq_logw.item(),
-                "E_r_w": Er_w.item(),
-                "constraint_resid": (Er_w - 1.0).abs().item(),
-                "temperature": self.kliep_temperature,
-                "g_real_mean": g_real.mean().item(),
-                "g_fake_mean": g_fake.mean().item(),
-            })
+                # Penalized form: -E_q[log w] + λ(E_r[w] - 1)²
+                loss = -Eq_logw + self.kliep_lambda * (Er_w - 1.0) ** 2
+
+                metrics.update({
+                    "kliep_loss": loss.detach().item(),
+                    "E_q_logw": Eq_logw.item(),
+                    "E_r_w": Er_w.item(),
+                    "constraint_resid": (Er_w - 1.0).abs().item(),
+                    "temperature": self.kliep_temperature,
+                    "g_real_mean": g_real.mean().item(),
+                    "g_fake_mean": g_fake.mean().item(),
+                    "mode": "penalized",
+                })
 
         return loss, metrics
 
