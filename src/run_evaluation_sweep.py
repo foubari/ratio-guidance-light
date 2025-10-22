@@ -55,7 +55,7 @@ def run_evaluation_sweep(
 
     # Auto-detect available loss types if not specified
     if loss_types is None:
-        all_loss_types = ['disc', 'dv', 'ulsif', 'rulsif', 'kliep']
+        all_loss_types = ['disc', 'dv', 'ulsif', 'rulsif', 'kliep', 'infonce']
         ratio_dir = Path('checkpoints/ratio')
         loss_types = []
         for loss_type in all_loss_types:
@@ -157,6 +157,7 @@ def plot_results(results, output_dir='outputs/evaluation_sweep'):
         'ulsif': '#2ca02c',     # green
         'rulsif': '#d62728',    # red
         'kliep': '#9467bd',     # purple
+        'infonce': '#8c564b',   # brown
     }
 
     # Marker styles
@@ -166,6 +167,7 @@ def plot_results(results, output_dir='outputs/evaluation_sweep'):
         'ulsif': '^',
         'rulsif': 'D',
         'kliep': 'v',
+        'infonce': 'p',         # pentagon
     }
 
     # Plot each loss type
@@ -256,6 +258,7 @@ def create_comparison_plot(results, output_path):
         'ulsif': '#2ca02c',
         'rulsif': '#d62728',
         'kliep': '#9467bd',
+        'infonce': '#8c564b',
     }
 
     for loss_type, loss_data in results.items():
@@ -341,7 +344,7 @@ if __name__ == "__main__":
         description='Run comprehensive evaluation sweep across guidance scales'
     )
     parser.add_argument('--loss_types', type=str, nargs='+',
-                       choices=['disc', 'dv', 'ulsif', 'rulsif', 'kliep'],
+                       choices=['disc', 'dv', 'ulsif', 'rulsif', 'kliep', 'infonce'],
                        help='Loss types to evaluate (default: auto-detect all)')
     parser.add_argument('--scales', type=float, nargs='+',
                        help='Guidance scales to test (default: 2.0 to 10.0)')

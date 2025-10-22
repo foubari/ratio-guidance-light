@@ -368,7 +368,6 @@ class DensityRatioLoss(nn.Module):
                     "E_q_g": Eq_g.item(),
                     "log_Er_exp_g": log_Er_exp_g.item(),
                     "E_r_w": Er_w.item(),
-                    "mode": "canonical",
                 })
 
             # Option 2: Penalized form with stabilizers
@@ -395,10 +394,8 @@ class DensityRatioLoss(nn.Module):
                     "E_q_logw": Eq_logw.item(),
                     "E_r_w": Er_w.item(),
                     "constraint_resid": (Er_w - 1.0).abs().item(),
-                    "temperature": self.kliep_temperature,
                     "g_real_mean": g_real.mean().item(),
                     "g_fake_mean": g_fake.mean().item(),
-                    "mode": "penalized",
                 })
 
         return loss, metrics

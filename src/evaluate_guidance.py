@@ -312,7 +312,7 @@ def evaluate_all_losses(guidance_scale, **kwargs):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Evaluate guided sampling')
     parser.add_argument('--loss_type', type=str,
-                       choices=['disc', 'dv', 'ulsif', 'rulsif', 'kliep'],
+                       choices=['disc', 'dv', 'ulsif', 'rulsif', 'kliep', 'infonce'],
                        help='Loss type to evaluate')
     parser.add_argument('--guidance_scale', type=float, default=2.0,
                        help='Guidance scale (default: 2.0)')
