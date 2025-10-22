@@ -173,7 +173,12 @@ class RatioTrainer:
         avg_metrics = {}
         for key in epoch_metrics[0].keys():
             if key != 'skipped':
-                avg_metrics[key] = sum(m[key] for m in epoch_metrics) / len(epoch_metrics)
+                # Skip non-numeric metrics (e.g., 'mode' string)
+                if isinstance(epoch_metrics[0][key], (int, float)):
+                    avg_metrics[key] = sum(m[key] for m in epoch_metrics) / len(epoch_metrics)
+                else:
+                    # Keep the first value for non-numeric metrics
+                    avg_metrics[key] = epoch_metrics[0][key]
 
         return avg_metrics
 
@@ -196,34 +201,66 @@ class RatioTrainer:
             img2 = batch['img2'].to(self.device)
             is_real = batch['is_real'].to(self.device)
 
-            real_mask = is_real > 0.5
-            fake_mask = ~real_mask
+            # InfoNCE: special handling - use only real pairs to construct (B, B) matrix
+            if self.loss_fn.loss_type == "infonce":
+                real_mask = is_real > 0.5
+                if real_mask.sum() == 0:
+                    continue
 
-            if real_mask.sum() == 0 or fake_mask.sum() == 0:
-                continue
+                img1_real = img1[real_mask]
+                img2_real = img2[real_mask]
+                B = len(img1_real)
 
-            img1_real = img1[real_mask]
-            img2_real = img2[real_mask]
-            img1_fake = img1[fake_mask]
-            img2_fake = img2[fake_mask]
+                # Sample single timestep
+                t = torch.randint(0, self.schedule.num_timesteps, (1,), device=self.device).item()
+                t_batch = torch.full((B,), t, device=self.device, dtype=torch.long)
 
-            # Sample timesteps
-            t_real = torch.randint(0, self.schedule.num_timesteps, (len(img1_real),), device=self.device)
-            t_fake = torch.randint(0, self.schedule.num_timesteps, (len(img1_fake),), device=self.device)
+                # Add noise
+                img1_noisy, _ = self.schedule.add_noise(img1_real, t_batch)
+                img2_noisy, _ = self.schedule.add_noise(img2_real, t_batch)
 
-            # Add noise
-            img1_real_noisy, _ = self.schedule.add_noise(img1_real, t_real)
-            img2_real_noisy, _ = self.schedule.add_noise(img2_real, t_real)
-            img1_fake_noisy, _ = self.schedule.add_noise(img1_fake, t_fake)
-            img2_fake_noisy, _ = self.schedule.add_noise(img2_fake, t_fake)
+                # Compute score matrix
+                T_mat = torch.zeros(B, B, device=self.device)
+                for i in range(B):
+                    x_i = img1_noisy[i:i+1].expand(B, -1, -1, -1)
+                    y_all = img2_noisy
+                    t_all = t_batch
+                    T_mat[i, :] = self.model(x_i, y_all, t_all).squeeze()
 
-            # Forward pass
-            scores_real = self.model(img1_real_noisy, img2_real_noisy, t_real)
-            scores_fake = self.model(img1_fake_noisy, img2_fake_noisy, t_fake)
+                # Compute loss
+                loss, metrics = self.loss_fn(T_mat)
+                metrics['loss'] = loss.item()
 
-            # Compute loss
-            loss, metrics = self.loss_fn(scores_real, scores_fake)
-            metrics['loss'] = loss.item()
+            # Standard methods: separate real/fake pairs
+            else:
+                real_mask = is_real > 0.5
+                fake_mask = ~real_mask
+
+                if real_mask.sum() == 0 or fake_mask.sum() == 0:
+                    continue
+
+                img1_real = img1[real_mask]
+                img2_real = img2[real_mask]
+                img1_fake = img1[fake_mask]
+                img2_fake = img2[fake_mask]
+
+                # Sample timesteps
+                t_real = torch.randint(0, self.schedule.num_timesteps, (len(img1_real),), device=self.device)
+                t_fake = torch.randint(0, self.schedule.num_timesteps, (len(img1_fake),), device=self.device)
+
+                # Add noise
+                img1_real_noisy, _ = self.schedule.add_noise(img1_real, t_real)
+                img2_real_noisy, _ = self.schedule.add_noise(img2_real, t_real)
+                img1_fake_noisy, _ = self.schedule.add_noise(img1_fake, t_fake)
+                img2_fake_noisy, _ = self.schedule.add_noise(img2_fake, t_fake)
+
+                # Forward pass
+                scores_real = self.model(img1_real_noisy, img2_real_noisy, t_real)
+                scores_fake = self.model(img1_fake_noisy, img2_fake_noisy, t_fake)
+
+                # Compute loss
+                loss, metrics = self.loss_fn(scores_real, scores_fake)
+                metrics['loss'] = loss.item()
 
             val_metrics.append(metrics)
 
@@ -233,7 +270,12 @@ class RatioTrainer:
 
         avg_metrics = {}
         for key in val_metrics[0].keys():
-            avg_metrics[key] = sum(m[key] for m in val_metrics) / len(val_metrics)
+            # Skip non-numeric metrics (e.g., 'mode' string)
+            if isinstance(val_metrics[0][key], (int, float)):
+                avg_metrics[key] = sum(m[key] for m in val_metrics) / len(val_metrics)
+            else:
+                # Keep the first value for non-numeric metrics
+                avg_metrics[key] = val_metrics[0][key]
 
         return avg_metrics
 
