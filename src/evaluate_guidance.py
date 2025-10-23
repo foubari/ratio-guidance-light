@@ -30,6 +30,7 @@ from models.classifier import MNISTClassifier
 from data.mnist_dataset import RotatedMNIST
 from utils.diffusion import DiffusionSchedule
 from utils.losses import DensityRatioLoss
+from utils.path_utils import get_checkpoint_path, list_available_models
 
 
 def load_diffusion_model(checkpoint_path, device):
@@ -96,7 +97,13 @@ def evaluate_guidance(
     ratio_checkpoint_dir='checkpoints/ratio',
     classifier_checkpoint_dir='checkpoints/classifiers',
     save_results=True,
-    output_dir='outputs/evaluation'
+    output_dir='outputs/evaluation',
+    # Hyperparameters for finding the correct checkpoint
+    rulsif_alpha=None,
+    rulsif_link=None,
+    kliep_lambda=None,
+    infonce_tau=None,
+    ulsif_l2=None
 ):
     """
     Evaluate guided sampling accuracy.
@@ -119,12 +126,36 @@ def evaluate_guidance(
     model, num_timesteps = load_diffusion_model(diffusion_ckpt, device)
     schedule = DiffusionSchedule(num_timesteps=num_timesteps, device=device)
 
-    # Load ratio model
-    ratio_ckpt = Path(ratio_checkpoint_dir) / loss_type / 'best_model.pt'
+    # Load ratio model with hyperparameter-based path
+    # Use defaults if not specified
+    hyperparams = {
+        'rulsif_alpha': rulsif_alpha if rulsif_alpha is not None else 0.2,
+        'rulsif_link': rulsif_link if rulsif_link is not None else 'exp',
+        'kliep_lambda': kliep_lambda if kliep_lambda is not None else 1.0,
+        'infonce_tau': infonce_tau if infonce_tau is not None else 0.07,
+        'ulsif_l2': ulsif_l2 if ulsif_l2 is not None else 0.0,
+    }
+
+    ratio_ckpt_dir = get_checkpoint_path(ratio_checkpoint_dir, loss_type, **hyperparams)
+    ratio_ckpt = ratio_ckpt_dir / 'best_model.pt'
+
     if not ratio_ckpt.exists():
-        raise FileNotFoundError(f"Ratio model not found: {ratio_ckpt}")
+        # Try to find an available model if exact match not found
+        available = list_available_models(ratio_checkpoint_dir, loss_type)
+        if available:
+            print(f"⚠️  Model not found at: {ratio_ckpt}")
+            print(f"Available {loss_type} models:")
+            for model_info in available:
+                print(f"  - {model_info['path'].name}")
+            raise FileNotFoundError(
+                f"Ratio model not found: {ratio_ckpt}\n"
+                f"Use hyperparameter flags (--rulsif_link, --kliep_lambda, etc.) to specify the model."
+            )
+        else:
+            raise FileNotFoundError(f"No {loss_type} models found in {ratio_checkpoint_dir}")
 
     print(f"Loading ratio model ({loss_type})...")
+    print(f"  Path: {ratio_ckpt_dir.name}")
     ratio_model, _ = load_ratio_model(ratio_ckpt, device)
 
     # Load classifiers
@@ -327,6 +358,19 @@ if __name__ == "__main__":
     parser.add_argument('--output_dir', type=str, default='outputs/evaluation',
                        help='Output directory (default: outputs/evaluation)')
 
+    # Hyperparameter arguments for loading specific models
+    parser.add_argument('--rulsif_alpha', type=float, default=None,
+                       help='RuLSIF alpha parameter (default: 0.2 if not specified)')
+    parser.add_argument('--rulsif_link', type=str, default=None,
+                       choices=['exp', 'softplus', 'identity'],
+                       help='RuLSIF link function (default: exp if not specified)')
+    parser.add_argument('--kliep_lambda', type=float, default=None,
+                       help='KLIEP lambda parameter (default: 1.0 if not specified)')
+    parser.add_argument('--infonce_tau', type=float, default=None,
+                       help='InfoNCE temperature (default: 0.07 if not specified)')
+    parser.add_argument('--ulsif_l2', type=float, default=None,
+                       help='uLSIF L2 regularization (default: 0.0 if not specified)')
+
     args = parser.parse_args()
 
     # Determine what to evaluate
@@ -357,5 +401,10 @@ if __name__ == "__main__":
                 guidance_scale=args.guidance_scale,
                 num_samples=args.num_samples,
                 device=args.device,
-                output_dir=args.output_dir
+                output_dir=args.output_dir,
+                rulsif_alpha=args.rulsif_alpha,
+                rulsif_link=args.rulsif_link,
+                kliep_lambda=args.kliep_lambda,
+                infonce_tau=args.infonce_tau,
+                ulsif_l2=args.ulsif_l2
             )

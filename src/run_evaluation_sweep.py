@@ -27,6 +27,7 @@ import numpy as np
 from tqdm import tqdm
 
 from evaluate_guidance import evaluate_guidance
+from utils.path_utils import list_available_models, parse_hyperparams_from_path
 
 
 def run_evaluation_sweep(
@@ -53,27 +54,61 @@ def run_evaluation_sweep(
     if guidance_scales is None:
         guidance_scales = [2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]
 
-    # Auto-detect available loss types if not specified
-    if loss_types is None:
-        all_loss_types = ['disc', 'dv', 'ulsif', 'rulsif', 'kliep', 'infonce']
-        ratio_dir = Path('checkpoints/ratio')
-        loss_types = []
-        for loss_type in all_loss_types:
-            if (ratio_dir / loss_type / 'best_model.pt').exists():
-                loss_types.append(loss_type)
+    # Auto-detect available models with their hyperparameters
+    ratio_dir = Path('checkpoints/ratio')
 
-        if not loss_types:
+    if loss_types is None:
+        # Auto-detect all available models
+        available_models = list_available_models(str(ratio_dir))
+
+        if not available_models:
             raise FileNotFoundError(
                 "No trained ratio models found in checkpoints/ratio/\n"
                 "Please train at least one model first."
             )
 
+        # Group by loss type and get unique configurations
+        models_by_type = {}
+        for model_info in available_models:
+            hyperparams = model_info['hyperparams']
+            loss_type = hyperparams['loss_type']
+
+            if loss_type not in models_by_type:
+                models_by_type[loss_type] = []
+            models_by_type[loss_type].append(hyperparams)
+
+        # For sweep, we'll evaluate all discovered configurations
+        loss_types = list(models_by_type.keys())
+    else:
+        # If loss_types specified, get their available configurations
+        models_by_type = {}
+        for loss_type in loss_types:
+            available = list_available_models(str(ratio_dir), loss_type)
+            if available:
+                models_by_type[loss_type] = [m['hyperparams'] for m in available]
+            else:
+                print(f"Warning: No models found for {loss_type}, skipping...")
+
+        # Remove loss types with no models
+        loss_types = [lt for lt in loss_types if lt in models_by_type]
+
+        if not loss_types:
+            raise FileNotFoundError(
+                f"No trained models found for specified loss types in {ratio_dir}"
+            )
+
+    # Count total evaluations (each loss_type might have multiple configs)
+    total_configs = sum(len(configs) for configs in models_by_type.values())
+
     print(f"\n{'='*70}")
     print(f"EVALUATION SWEEP")
     print(f"{'='*70}")
-    print(f"Loss types: {loss_types}")
+    print(f"Discovered models:")
+    for loss_type, configs in models_by_type.items():
+        print(f"  {loss_type}: {len(configs)} configuration(s)")
     print(f"Guidance scales: {guidance_scales}")
     print(f"Samples per eval: {num_samples}")
+    print(f"Total evaluations: {total_configs} models × {len(guidance_scales)} scales = {total_configs * len(guidance_scales)}")
     print(f"{'='*70}\n")
 
     # Create output directory
@@ -84,39 +119,57 @@ def run_evaluation_sweep(
     all_results = {}
 
     # Run evaluations
-    total_evals = len(loss_types) * len(guidance_scales)
     eval_count = 0
 
     for loss_type in loss_types:
-        print(f"\n{'='*70}")
-        print(f"Evaluating {loss_type.upper()} loss")
-        print(f"{'='*70}")
+        configs = models_by_type[loss_type]
 
-        all_results[loss_type] = {}
+        for config_idx, hyperparams in enumerate(configs):
+            # Extract hyperparameters
+            rulsif_alpha = hyperparams.get('rulsif_alpha')
+            rulsif_link = hyperparams.get('rulsif_link')
+            kliep_lambda = hyperparams.get('kliep_lambda')
+            infonce_tau = hyperparams.get('infonce_tau')
+            ulsif_l2 = hyperparams.get('ulsif_l2')
 
-        for scale in guidance_scales:
-            eval_count += 1
-            print(f"\n[{eval_count}/{total_evals}] {loss_type} @ scale={scale}")
+            # Create a key for this configuration
+            from utils.path_utils import get_checkpoint_path
+            config_key = get_checkpoint_path('', loss_type, **hyperparams).name
 
-            try:
-                # Run evaluation
-                results = evaluate_guidance(
-                    loss_type=loss_type,
-                    guidance_scale=scale,
-                    num_samples=num_samples,
-                    device=device,
-                    save_results=True,
-                    output_dir=str(output_path / 'individual_results')
-                )
+            print(f"\n{'='*70}")
+            print(f"Evaluating {config_key}")
+            print(f"{'='*70}")
 
-                # Store accuracy
-                all_results[loss_type][scale] = results['accuracy']
+            all_results[config_key] = {}
 
-                print(f"  ✓ Accuracy: {results['accuracy']:.2f}%")
+            for scale in guidance_scales:
+                eval_count += 1
+                print(f"\n[{eval_count}/{total_configs * len(guidance_scales)}] {config_key} @ scale={scale}")
 
-            except Exception as e:
-                print(f"  ✗ Error: {e}")
-                all_results[loss_type][scale] = None
+                try:
+                    # Run evaluation with specific hyperparameters
+                    results = evaluate_guidance(
+                        loss_type=loss_type,
+                        guidance_scale=scale,
+                        num_samples=num_samples,
+                        device=device,
+                        save_results=True,
+                        output_dir=str(output_path / 'individual_results'),
+                        rulsif_alpha=rulsif_alpha,
+                        rulsif_link=rulsif_link,
+                        kliep_lambda=kliep_lambda,
+                        infonce_tau=infonce_tau,
+                        ulsif_l2=ulsif_l2
+                    )
+
+                    # Store accuracy
+                    all_results[config_key][scale] = results['accuracy']
+
+                    print(f"  ✓ Accuracy: {results['accuracy']:.2f}%")
+
+                except Exception as e:
+                    print(f"  ✗ Error: {e}")
+                    all_results[config_key][scale] = None
 
     # Save consolidated results
     results_file = output_path / 'sweep_results.json'

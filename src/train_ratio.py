@@ -18,6 +18,7 @@ from data.mnist_dataset import get_ratio_dataloader
 from utils.diffusion import DiffusionSchedule
 from utils.losses import DensityRatioLoss
 from utils.trainer import RatioTrainer
+from utils.path_utils import get_checkpoint_path
 
 
 def train_ratio_estimator(
@@ -34,6 +35,7 @@ def train_ratio_estimator(
     resume_from=None,
     # Loss-specific hyperparameters
     rulsif_alpha=0.2,
+    rulsif_link='exp',
     kliep_lambda=1.0,
     infonce_tau=0.07,
     ulsif_l2=0.0,
@@ -62,14 +64,39 @@ def train_ratio_estimator(
     """
     # Setup
     device = torch.device(device if torch.cuda.is_available() else 'cpu')
+
+    # Collect hyperparameters for path generation
+    hyperparams = {
+        'rulsif_alpha': rulsif_alpha,
+        'rulsif_link': rulsif_link,
+        'kliep_lambda': kliep_lambda,
+        'infonce_tau': infonce_tau,
+        'ulsif_l2': ulsif_l2,
+        'use_exp_w': False,  # default, could be made configurable
+    }
+
+    # Create save directory with hyperparameter-based naming
+    save_path = get_checkpoint_path(save_dir, loss_type, **hyperparams)
+    save_path.mkdir(parents=True, exist_ok=True)
+
     print(f"Training ratio estimator with {loss_type} loss")
+    print(f"Save path: {save_path}")
     print(f"Device: {device}")
     print(f"Epochs: {epochs}, Batch size: {batch_size}, Learning rate: {lr}")
     print(f"Real/Fake ratio: {real_fake_ratio}")
 
-    # Create save directory
-    save_path = Path(save_dir) / loss_type
-    save_path.mkdir(parents=True, exist_ok=True)
+    # Print non-default hyperparameters
+    non_defaults = []
+    if loss_type == "rulsif" and rulsif_alpha != 0.2:
+        non_defaults.append(f"rulsif_alpha={rulsif_alpha}")
+    if loss_type == "kliep" and kliep_lambda != 1.0:
+        non_defaults.append(f"kliep_lambda={kliep_lambda}")
+    if loss_type == "infonce" and infonce_tau != 0.07:
+        non_defaults.append(f"infonce_tau={infonce_tau}")
+    if loss_type == "ulsif" and ulsif_l2 > 0:
+        non_defaults.append(f"ulsif_l2={ulsif_l2}")
+    if non_defaults:
+        print(f"Hyperparameters: {', '.join(non_defaults)}")
 
     # Model
     model = RatioEstimator().to(device)
@@ -79,6 +106,7 @@ def train_ratio_estimator(
     loss_fn = DensityRatioLoss(
         loss_type=loss_type,
         rulsif_alpha=rulsif_alpha,
+        rulsif_link=rulsif_link,
         kliep_lambda=kliep_lambda,
         infonce_tau=infonce_tau,
         ulsif_l2=ulsif_l2
@@ -238,8 +266,11 @@ if __name__ == "__main__":
     # Loss-specific hyperparameters
     parser.add_argument('--rulsif_alpha', type=float, default=0.2,
                        help='Alpha parameter for RuLSIF (default: 0.2)')
+    parser.add_argument('--rulsif_link', type=str, default='exp',
+                       choices=['exp', 'softplus', 'identity'],
+                       help='Link function for RuLSIF (default: exp)')
     parser.add_argument('--kliep_lambda', type=float, default=1.0,
-                       help='Lambda parameter for KLIEP normalization penalty (default: 1.0)')
+                       help='Lambda parameter for KLIEP normalization penalty (default: 1.0, 0.0 for canonical)')
     parser.add_argument('--infonce_tau', type=float, default=0.07,
                        help='Temperature parameter for InfoNCE (default: 0.07)')
     parser.add_argument('--ulsif_l2', type=float, default=0.0,
@@ -262,6 +293,7 @@ if __name__ == "__main__":
         patience=args.patience,
         resume_from=args.resume_from,
         rulsif_alpha=args.rulsif_alpha,
+        rulsif_link=args.rulsif_link,
         kliep_lambda=args.kliep_lambda,
         infonce_tau=args.infonce_tau,
         ulsif_l2=args.ulsif_l2,
