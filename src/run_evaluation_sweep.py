@@ -397,7 +397,7 @@ if __name__ == "__main__":
         description='Run comprehensive evaluation sweep across guidance scales'
     )
     parser.add_argument('--loss_types', type=str, nargs='+',
-                       choices=['disc', 'dv', 'ulsif', 'rulsif', 'kliep', 'infonce'],
+                       choices=['disc', 'dv', 'ulsif', 'rulsif', 'kliep', 'infonce', 'nce', 'alpha_div', 'mine', 'ctsm', 'ctsm_v'],
                        help='Loss types to evaluate (default: auto-detect all)')
     parser.add_argument('--scales', type=float, nargs='+',
                        help='Guidance scales to test (default: 2.0 to 10.0)')

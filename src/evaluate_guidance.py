@@ -103,7 +103,10 @@ def evaluate_guidance(
     rulsif_link=None,
     kliep_lambda=None,
     infonce_tau=None,
-    ulsif_l2=None
+    ulsif_l2=None,
+    alpha_div_alpha=None,
+    mine_use_ema=None,
+    mine_ema_rate=None
 ):
     """
     Evaluate guided sampling accuracy.
@@ -134,6 +137,9 @@ def evaluate_guidance(
         'kliep_lambda': kliep_lambda if kliep_lambda is not None else 1.0,
         'infonce_tau': infonce_tau if infonce_tau is not None else 0.07,
         'ulsif_l2': ulsif_l2 if ulsif_l2 is not None else 0.0,
+        'alpha_div_alpha': alpha_div_alpha if alpha_div_alpha is not None else 0.5,
+        'mine_use_ema': mine_use_ema if mine_use_ema is not None else True,
+        'mine_ema_rate': mine_ema_rate if mine_ema_rate is not None else 0.99,
     }
 
     ratio_ckpt_dir = get_checkpoint_path(ratio_checkpoint_dir, loss_type, **hyperparams)
@@ -343,7 +349,7 @@ def evaluate_all_losses(guidance_scale, **kwargs):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Evaluate guided sampling')
     parser.add_argument('--loss_type', type=str,
-                       choices=['disc', 'dv', 'ulsif', 'rulsif', 'kliep', 'infonce'],
+                       choices=['disc', 'dv', 'ulsif', 'rulsif', 'kliep', 'infonce', 'nce', 'alpha_div', 'mine', 'ctsm', 'ctsm_v'],
                        help='Loss type to evaluate')
     parser.add_argument('--guidance_scale', type=float, default=2.0,
                        help='Guidance scale (default: 2.0)')
@@ -370,6 +376,12 @@ if __name__ == "__main__":
                        help='InfoNCE temperature (default: 0.07 if not specified)')
     parser.add_argument('--ulsif_l2', type=float, default=None,
                        help='uLSIF L2 regularization (default: 0.0 if not specified)')
+    parser.add_argument('--alpha_div_alpha', type=float, default=None,
+                       help='α-Divergence alpha parameter (default: 0.5 if not specified)')
+    parser.add_argument('--mine_use_ema', type=bool, default=None,
+                       help='MINE use EMA (default: True if not specified)')
+    parser.add_argument('--mine_ema_rate', type=float, default=None,
+                       help='MINE EMA rate (default: 0.99 if not specified)')
 
     args = parser.parse_args()
 
@@ -406,5 +418,8 @@ if __name__ == "__main__":
                 rulsif_link=args.rulsif_link,
                 kliep_lambda=args.kliep_lambda,
                 infonce_tau=args.infonce_tau,
-                ulsif_l2=args.ulsif_l2
+                ulsif_l2=args.ulsif_l2,
+                alpha_div_alpha=args.alpha_div_alpha,
+                mine_use_ema=args.mine_use_ema,
+                mine_ema_rate=args.mine_ema_rate
             )

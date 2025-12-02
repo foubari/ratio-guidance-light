@@ -1,0 +1,8 @@
+{
+  "loss_type": "ulsif",
+  "guidance_scale": 3.0,
+  "num_samples": 100,
+  "accuracy": 18.000000715255737,
+  "num_matches": 18.0,
+  "total_samples": 100
+}

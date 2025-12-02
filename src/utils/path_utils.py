@@ -72,6 +72,33 @@ def get_model_name_suffix(loss_type, **hyperparams):
         if tau != 0.07:
             suffix_parts.append(f"tau{tau:.3f}".replace('.', 'p'))
 
+    elif loss_type == "nce":
+        # NCE: No specific hyperparameters
+        pass
+
+    elif loss_type == "alpha_div":
+        # α-Divergence: alpha_div_alpha (if non-default)
+        alpha = hyperparams.get('alpha_div_alpha', 0.5)
+        if alpha != 0.5:
+            suffix_parts.append(f"alpha{alpha:.2f}".replace('.', 'p'))
+
+    elif loss_type == "mine":
+        # MINE: mine_use_ema, mine_ema_rate (if non-default)
+        if not hyperparams.get('mine_use_ema', True):
+            suffix_parts.append("noema")
+        elif hyperparams.get('mine_ema_rate', 0.99) != 0.99:
+            rate = hyperparams.get('mine_ema_rate')
+            suffix_parts.append(f"ema{rate:.3f}".replace('.', 'p'))
+
+    elif loss_type in ["ctsm", "ctsm_v"]:
+        # CTSM/CTSM-v: weighting function (if non-default)
+        weighting = hyperparams.get('weighting', 'time_score_norm')
+        if weighting != 'time_score_norm':
+            if weighting == 'stein_score_norm':
+                suffix_parts.append("stein")
+            elif weighting == 'uniform':
+                suffix_parts.append("uniform")
+
     # Join with underscores
     if suffix_parts:
         return "_" + "_".join(suffix_parts)
@@ -150,6 +177,10 @@ def parse_hyperparams_from_path(checkpoint_path):
         elif part.startswith("tau"):
             tau_str = part[3:].replace('p', '.')
             hyperparams['infonce_tau'] = float(tau_str)
+        elif part.startswith("alpha") and len(part) > 5:
+            # α-divergence alpha parameter (distinguish from rulsif alpha by length)
+            alpha_str = part[5:].replace('p', '.')
+            hyperparams['alpha_div_alpha'] = float(alpha_str)
 
         i += 1
 
@@ -215,6 +246,16 @@ if __name__ == "__main__":
         ("kliep", {"kliep_lambda": 2.0, "use_exp_w": True}),
         ("infonce", {}),
         ("infonce", {"infonce_tau": 0.1}),
+        ("nce", {}),
+        ("alpha_div", {}),
+        ("alpha_div", {"alpha_div_alpha": 0.3}),
+        ("mine", {}),
+        ("mine", {"mine_use_ema": False}),
+        ("mine", {"mine_ema_rate": 0.95}),
+        ("ctsm", {}),
+        ("ctsm", {"weighting": "stein_score_norm"}),
+        ("ctsm_v", {}),
+        ("ctsm_v", {"weighting": "uniform"}),
     ]
 
     print("\n1. Testing path generation:")

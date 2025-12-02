@@ -1,0 +1,8 @@
+{
+  "loss_type": "dv",
+  "guidance_scale": 5.0,
+  "num_samples": 100,
+  "accuracy": 7.000000029802322,
+  "num_matches": 7.0,
+  "total_samples": 100
+}

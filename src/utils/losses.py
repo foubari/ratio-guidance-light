@@ -1,6 +1,9 @@
 """
 Density-ratio learning losses for PMI estimation.
-Implements 6 different loss functions: Discriminator, DV, uLSIF, RuLSIF, KLIEP, InfoNCE.
+Implements 9 different loss functions: Discriminator, DV, uLSIF, RuLSIF, KLIEP, InfoNCE, NCE, α-Divergence, MINE.
+
+Note: CTSM and CTSM-v are implemented separately in ctsm_losses.py as they require
+      different training loops (time score matching vs standard ratio estimation).
 
 Based on the original ratio_guidance implementation but simplified.
 """
@@ -23,6 +26,9 @@ class DensityRatioLoss(nn.Module):
       - "kliep"   : KLIEP (KL). Optimal ratio w ~ q/r
       - "infonce" : Symmetric InfoNCE. Learns PMI = log(q(x,y)/(q(x)q(y))) + const
                     WARNING: Valid only in-domain (test marginals = train marginals)
+      - "nce"     : Noise Contrastive Estimation. Direct log-ratio via binary classification
+      - "alpha_div": α-Divergence Neural DRE (default α=0.5). More stable than KL
+      - "mine"    : Mutual Information Neural Estimation. DV bound with EMA stabilization
 
     API:
       forward(T_real, T_fake) -> (loss, metrics)
@@ -55,15 +61,32 @@ class DensityRatioLoss(nn.Module):
         rulsif_norm_penalty: float = 0.0,
         rulsif_softplus_eps: float = 1e-6,
         # InfoNCE settings
-        infonce_tau: float = 0.07          # temperature for InfoNCE
+        infonce_tau: float = 0.07,          # temperature for InfoNCE
+        # NCE settings (no specific params, uses standard binary CE)
+        # α-Divergence settings
+        alpha_div_alpha: float = 0.5,       # α parameter for α-divergence (0.5 for stability)
+        # MINE settings
+        mine_use_ema: bool = True,          # use EMA for MINE stabilization
+        mine_ema_rate: float = 0.99         # EMA decay rate for MINE
     ):
         super().__init__()
-        assert loss_type in {"disc", "dv", "ulsif", "rulsif", "kliep", "infonce"}
+        assert loss_type in {"disc", "dv", "ulsif", "rulsif", "kliep", "infonce", "nce", "alpha_div", "mine"}
         self.loss_type = loss_type
         self.use_exp_w = use_exp_w
 
         # InfoNCE parameters
         self.infonce_tau = infonce_tau
+
+        # α-Divergence parameters
+        self.alpha_div_alpha = float(alpha_div_alpha)
+        assert 0.0 < self.alpha_div_alpha < 1.0, "alpha_div_alpha must be in (0, 1)"
+
+        # MINE parameters
+        self.mine_use_ema = mine_use_ema
+        self.mine_ema_rate = mine_ema_rate
+        if loss_type == "mine":
+            self.register_buffer('mine_ema_exp_t', torch.tensor(1.0))
+            self.register_buffer('mine_ema_initialized', torch.tensor(False))
 
         # DV parameters
         self.dv_use_ema = dv_use_ema
@@ -368,6 +391,7 @@ class DensityRatioLoss(nn.Module):
                     "E_q_g": Eq_g.item(),
                     "log_Er_exp_g": log_Er_exp_g.item(),
                     "E_r_w": Er_w.item(),
+                    "mode": "canonical",
                 })
 
             # Option 2: Penalized form with stabilizers
@@ -394,9 +418,121 @@ class DensityRatioLoss(nn.Module):
                     "E_q_logw": Eq_logw.item(),
                     "E_r_w": Er_w.item(),
                     "constraint_resid": (Er_w - 1.0).abs().item(),
+                    "temperature": self.kliep_temperature,
                     "g_real_mean": g_real.mean().item(),
                     "g_fake_mean": g_fake.mean().item(),
+                    "mode": "penalized",
                 })
+
+        elif self.loss_type == "nce":
+            # NCE (Noise Contrastive Estimation)
+            # Treats density-ratio estimation as binary classification
+            # Formula: L = -E[log σ(T_real)] - E[log σ(-T_fake)]
+            # This directly learns log-ratio without exponential
+            loss_real = -F.logsigmoid(T_real).mean()
+            loss_fake = -F.logsigmoid(-T_fake).mean()
+            loss = loss_real + loss_fake
+
+            # Compute accuracies (like discriminator)
+            with torch.no_grad():
+                real_acc = (torch.sigmoid(T_real) > 0.5).float().mean()
+                fake_acc = (torch.sigmoid(T_fake) < 0.5).float().mean()
+                total_acc = 0.5 * (real_acc + fake_acc)
+
+            metrics.update({
+                "nce_loss": loss.detach().item(),
+                "loss_real": loss_real.item(),
+                "loss_fake": loss_fake.item(),
+                "real_acc": real_acc.item(),
+                "fake_acc": fake_acc.item(),
+                "total_acc": total_acc.item(),
+                "T_real_mean": T_real.mean().item(),
+                "T_fake_mean": T_fake.mean().item(),
+            })
+
+        elif self.loss_type == "alpha_div":
+            # α-Divergence Neural Density-Ratio Estimation
+            # More stable than KL divergence, uses α parameter (default 0.5)
+            # Formula: L_α = (1/α) E[exp(α·T_real)] - 1/(α-1) E[exp((α-1)·T_fake)]
+
+            # Clip for numerical stability
+            T_real_clipped = torch.clamp(T_real, -10, 10)
+            T_fake_clipped = torch.clamp(T_fake, -10, 10)
+
+            alpha = self.alpha_div_alpha
+
+            # Term 1: (1/α) * E[exp(α·T_real)]
+            term1 = (1.0 / alpha) * torch.exp(alpha * T_real_clipped).mean()
+
+            # Term 2: -1/(α-1) * E[exp((α-1)·T_fake)]
+            # Note: α ∈ (0,1) so (α-1) < 0, making exp term decrease with T
+            term2 = -(1.0 / (alpha - 1)) * torch.exp((alpha - 1) * T_fake_clipped).mean()
+
+            loss = term1 + term2
+
+            # Additional stability metrics
+            with torch.no_grad():
+                exp_alpha_real = torch.exp(alpha * T_real_clipped)
+                exp_alpham1_fake = torch.exp((alpha - 1) * T_fake_clipped)
+
+            metrics.update({
+                "alpha_div_loss": loss.detach().item(),
+                "alpha": alpha,
+                "term1": term1.detach().item(),
+                "term2": term2.detach().item(),
+                "T_real_mean": T_real.mean().item(),
+                "T_fake_mean": T_fake.mean().item(),
+                "exp_alpha_real_mean": exp_alpha_real.mean().item(),
+                "exp_alpham1_fake_mean": exp_alpham1_fake.mean().item(),
+            })
+
+        elif self.loss_type == "mine":
+            # MINE (Mutual Information Neural Estimation)
+            # Similar to DV but uses pure EMA for better stability
+            # Formula: I = E_q[T] - log E_r[exp(T)]
+            E_q_T = T_real.mean()
+
+            # Clip T before exp to prevent overflow
+            T_fake_clipped = torch.clamp(T_fake, max=10.0)
+
+            if self.mine_use_ema and self.training:
+                # Differentiable term for gradient flow
+                log_E_r_exp_T_diff = self.log_mean_exp(T_fake_clipped)
+
+                # EMA term for stability (no gradient)
+                with torch.no_grad():
+                    exp_t_fake = T_fake_clipped.exp().mean()
+                    if not self.mine_ema_initialized:
+                        self.mine_ema_exp_t = self.mine_ema_exp_t.to(exp_t_fake.device)
+                        self.mine_ema_exp_t.copy_(exp_t_fake)
+                        self.mine_ema_initialized.fill_(True)
+                    else:
+                        self.mine_ema_exp_t.mul_(self.mine_ema_rate).add_(
+                            (1 - self.mine_ema_rate) * exp_t_fake
+                        )
+                    log_E_r_exp_T_ema = self.mine_ema_exp_t.clamp(min=EPS).log()
+
+                # Use pure EMA for MINE (more stable than DV's mixed approach)
+                log_E_r_exp_T = log_E_r_exp_T_ema
+            else:
+                # Evaluation mode: use direct computation
+                log_E_r_exp_T = self.log_mean_exp(T_fake_clipped)
+
+            # MINE bound (MI lower bound)
+            mine_bound = E_q_T - log_E_r_exp_T
+
+            # Loss: minimize negative bound
+            loss = -mine_bound
+
+            metrics.update({
+                "mine_bound": mine_bound.detach().item(),
+                "E_q_T": E_q_T.detach().item(),
+                "log_E_r_exp_T": log_E_r_exp_T.detach().item(),
+                "T_real_mean": T_real.mean().detach().item(),
+                "T_real_std": T_real.std().detach().item() if T_real.numel() > 1 else 0,
+                "T_fake_mean": T_fake.mean().detach().item(),
+                "T_fake_std": T_fake.std().detach().item() if T_fake.numel() > 1 else 0,
+            })
 
         return loss, metrics
 
@@ -407,7 +543,7 @@ if __name__ == "__main__":
     batch_size = 32
 
     # Test each loss type
-    for loss_type in ["disc", "dv", "ulsif", "rulsif", "kliep", "infonce"]:
+    for loss_type in ["disc", "dv", "ulsif", "rulsif", "kliep", "infonce", "nce", "alpha_div", "mine"]:
         print(f"\nTesting {loss_type}:")
 
         loss_fn = DensityRatioLoss(loss_type=loss_type)

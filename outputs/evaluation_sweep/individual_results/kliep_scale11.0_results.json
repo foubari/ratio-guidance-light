@@ -1,0 +1,8 @@
+{
+  "loss_type": "kliep",
+  "guidance_scale": 11.0,
+  "num_samples": 100,
+  "accuracy": 3.999999910593033,
+  "num_matches": 4.0,
+  "total_samples": 100
+}

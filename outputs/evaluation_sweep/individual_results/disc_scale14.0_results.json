@@ -1,0 +1,8 @@
+{
+  "loss_type": "disc",
+  "guidance_scale": 14.0,
+  "num_samples": 100,
+  "accuracy": 37.99999952316284,
+  "num_matches": 38.0,
+  "total_samples": 100
+}

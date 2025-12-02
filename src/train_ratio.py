@@ -8,6 +8,9 @@ Usage:
     python src/train_ratio.py --loss_type rulsif --epochs 30
     python src/train_ratio.py --loss_type kliep --epochs 30
     python src/train_ratio.py --loss_type infonce --epochs 30
+    python src/train_ratio.py --loss_type nce --epochs 30
+    python src/train_ratio.py --loss_type alpha_div --epochs 30
+    python src/train_ratio.py --loss_type mine --epochs 30
 """
 import argparse
 import torch
@@ -39,13 +42,16 @@ def train_ratio_estimator(
     kliep_lambda=1.0,
     infonce_tau=0.07,
     ulsif_l2=0.0,
-    weight_decay=0.0
+    weight_decay=0.0,
+    alpha_div_alpha=0.5,
+    mine_use_ema=True,
+    mine_ema_rate=0.99
 ):
     """
     Train density-ratio estimator.
 
     Args:
-        loss_type: One of ['disc', 'dv', 'ulsif', 'rulsif', 'kliep', 'infonce']
+        loss_type: One of ['disc', 'dv', 'ulsif', 'rulsif', 'kliep', 'infonce', 'nce', 'alpha_div', 'mine']
         epochs: Number of training epochs
         batch_size: Batch size
         lr: Learning rate
@@ -61,6 +67,9 @@ def train_ratio_estimator(
         infonce_tau: Temperature for InfoNCE (default: 0.07)
         ulsif_l2: L2 regularization for uLSIF (default: 0.0, prefer weight_decay)
         weight_decay: Weight decay for optimizer (default: 0.0)
+        alpha_div_alpha: Alpha parameter for α-Divergence (default: 0.5)
+        mine_use_ema: Use EMA for MINE stabilization (default: True)
+        mine_ema_rate: EMA decay rate for MINE (default: 0.99)
     """
     # Setup
     device = torch.device(device if torch.cuda.is_available() else 'cpu')
@@ -73,6 +82,9 @@ def train_ratio_estimator(
         'infonce_tau': infonce_tau,
         'ulsif_l2': ulsif_l2,
         'use_exp_w': False,  # default, could be made configurable
+        'alpha_div_alpha': alpha_div_alpha,
+        'mine_use_ema': mine_use_ema,
+        'mine_ema_rate': mine_ema_rate,
     }
 
     # Create save directory with hyperparameter-based naming
@@ -95,6 +107,12 @@ def train_ratio_estimator(
         non_defaults.append(f"infonce_tau={infonce_tau}")
     if loss_type == "ulsif" and ulsif_l2 > 0:
         non_defaults.append(f"ulsif_l2={ulsif_l2}")
+    if loss_type == "alpha_div" and alpha_div_alpha != 0.5:
+        non_defaults.append(f"alpha_div_alpha={alpha_div_alpha}")
+    if loss_type == "mine" and not mine_use_ema:
+        non_defaults.append(f"mine_use_ema={mine_use_ema}")
+    if loss_type == "mine" and mine_ema_rate != 0.99:
+        non_defaults.append(f"mine_ema_rate={mine_ema_rate}")
     if non_defaults:
         print(f"Hyperparameters: {', '.join(non_defaults)}")
 
@@ -109,7 +127,10 @@ def train_ratio_estimator(
         rulsif_link=rulsif_link,
         kliep_lambda=kliep_lambda,
         infonce_tau=infonce_tau,
-        ulsif_l2=ulsif_l2
+        ulsif_l2=ulsif_l2,
+        alpha_div_alpha=alpha_div_alpha,
+        mine_use_ema=mine_use_ema,
+        mine_ema_rate=mine_ema_rate
     )
 
     # Optimizer with weight decay
@@ -191,6 +212,15 @@ def train_ratio_estimator(
             print(f'  Train Accuracy: {train_metrics.get("accuracy_avg", 0):.4f}')
             print(f'  Val Accuracy: {val_metrics.get("accuracy_avg", 0):.4f}')
             print(f'  Diag vs Off-diag (train): {train_metrics.get("diag_vs_offdiag", 0):.4f}')
+        elif loss_type == 'nce':
+            print(f'  Train Acc: {train_metrics.get("total_acc", 0):.4f}')
+            print(f'  Val Acc: {val_metrics.get("total_acc", 0):.4f}')
+        elif loss_type == 'alpha_div':
+            print(f'  T_real mean (train): {train_metrics.get("T_real_mean", 0):.4f}')
+            print(f'  T_fake mean (train): {train_metrics.get("T_fake_mean", 0):.4f}')
+        elif loss_type == 'mine':
+            print(f'  MINE Bound (train): {train_metrics.get("mine_bound", 0):.4f}')
+            print(f'  MINE Bound (val): {val_metrics.get("mine_bound", 0):.4f}')
 
         # Save best model
         if val_metrics['loss'] < best_val_loss:
@@ -239,7 +269,7 @@ def train_ratio_estimator(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Train density-ratio estimator')
     parser.add_argument('--loss_type', type=str,
-                       choices=['disc', 'dv', 'ulsif', 'rulsif', 'kliep', 'infonce'],
+                       choices=['disc', 'dv', 'ulsif', 'rulsif', 'kliep', 'infonce', 'nce', 'alpha_div', 'mine'],
                        required=True,
                        help='Loss type for density-ratio estimation')
     parser.add_argument('--epochs', type=int, default=30,
@@ -277,6 +307,12 @@ if __name__ == "__main__":
                        help='L2 regularization for uLSIF (default: 0.0, use weight_decay instead)')
     parser.add_argument('--weight_decay', type=float, default=0.0,
                        help='Weight decay for optimizer (default: 0.0)')
+    parser.add_argument('--alpha_div_alpha', type=float, default=0.5,
+                       help='Alpha parameter for α-Divergence (default: 0.5, must be in (0,1))')
+    parser.add_argument('--mine_use_ema', type=bool, default=True,
+                       help='Use EMA for MINE stabilization (default: True)')
+    parser.add_argument('--mine_ema_rate', type=float, default=0.99,
+                       help='EMA decay rate for MINE (default: 0.99)')
 
     args = parser.parse_args()
 
@@ -297,5 +333,8 @@ if __name__ == "__main__":
         kliep_lambda=args.kliep_lambda,
         infonce_tau=args.infonce_tau,
         ulsif_l2=args.ulsif_l2,
-        weight_decay=args.weight_decay
+        weight_decay=args.weight_decay,
+        alpha_div_alpha=args.alpha_div_alpha,
+        mine_use_ema=args.mine_use_ema,
+        mine_ema_rate=args.mine_ema_rate
     )

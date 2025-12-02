@@ -1,0 +1,8 @@
+{
+  "loss_type": "rulsif",
+  "guidance_scale": 1.0,
+  "num_samples": 100,
+  "accuracy": 20.000000298023224,
+  "num_matches": 20.0,
+  "total_samples": 100
+}

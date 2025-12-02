@@ -1,0 +1,8 @@
+{
+  "loss_type": "infonce",
+  "guidance_scale": 12.0,
+  "num_samples": 100,
+  "accuracy": 27.000001072883606,
+  "num_matches": 27.0,
+  "total_samples": 100
+}
